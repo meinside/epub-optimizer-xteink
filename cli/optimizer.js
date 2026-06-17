@@ -158,28 +158,31 @@ function breakLongWords(html, maxLen) {
  *   - U+00A0 (nbsp) is emitted as its own non-breaking word token, never a
  *     word boundary, so it renders as a visible space -> use for indentation.
  * So we rewrite the raw text of each <pre> block:
- *   - newlines              -> <br/>      (hard line break)
- *   - leading whitespace of  -> nbsp run  (indentation; tab counts as 4)
- *     each visual line
- * Only whitespace at the *start of a line* becomes non-breaking; spaces
- * between tokens stay breakable so long lines can still wrap on the narrow
- * screen instead of clipping off-edge. The block is scanned tag-by-tag so
- * inline markup (per-line spans) is passed through verbatim and "line start"
- * is tracked across tag boundaries.
+ *   - newlines               -> <br/>     (hard line break)
+ *   - tabs                    -> 4 nbsp    (indentation)
+ *   - runs of 2+ spaces       -> nbsp run  (indentation / alignment)
+ * Runs of two or more spaces are treated as intentional layout (leading indent,
+ * post-line-number indent, or column alignment) and become non-breaking, so they
+ * survive regardless of *where* in the line they sit -- the previous "only the
+ * start of a line counts" rule missed indentation that follows a line-number
+ * span (e.g. "<span>29</span>      struct ..."). A single space stays a normal
+ * breakable space so long lines can still wrap on the narrow screen instead of
+ * clipping off-edge. Tags are passed through verbatim so inline markup
+ * (per-line / line-number spans, syntax-highlight spans) is preserved; each
+ * text node is processed on its own, which is fine because indentation runs are
+ * not split across tags in practice.
  */
 function preserveCodeLayout(html) {
     const NBSP = '\u00A0';
     return html.replace(/<pre\b[^>]*>[\s\S]*?<\/pre>/gi, function (block) {
         let out = '';
         let i = 0;
-        let atLineStart = true;
         while (i < block.length) {
             if (block[i] === '<') {
                 const end = block.indexOf('>', i);
                 const tag = end === -1 ? block.slice(i) : block.slice(i, end + 1);
                 out += tag;
                 i = end === -1 ? block.length : end + 1;
-                if (/^<br\b/i.test(tag)) atLineStart = true;
                 continue;
             }
             let next = block.indexOf('<', i);
@@ -191,11 +194,14 @@ function preserveCodeLayout(html) {
                 if (c === '\n' || c === '\r') {
                     if (c === '\r' && text[k + 1] === '\n') k++;
                     out += '<br/>';
-                    atLineStart = true;
-                } else if (atLineStart && (c === ' ' || c === '\t')) {
-                    out += c === '\t' ? NBSP.repeat(4) : NBSP;
+                } else if (c === '\t') {
+                    out += NBSP.repeat(4);
+                } else if (c === ' ') {
+                    // Count this run of spaces; a run of 2+ is intentional layout.
+                    let run = 1;
+                    while (text[k + 1] === ' ') { run++; k++; }
+                    out += run === 1 ? ' ' : NBSP.repeat(run);
                 } else {
-                    if (c !== ' ' && c !== '\t') atLineStart = false;
                     out += c;
                 }
             }
