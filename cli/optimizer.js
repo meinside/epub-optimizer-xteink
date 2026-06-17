@@ -140,6 +140,71 @@ function breakLongWords(html, maxLen) {
 }
 
 /**
+ * Preserve code-block layout (line breaks + indentation) inside <pre> blocks.
+ *
+ * The CrossPoint firmware (Xteink X4/X3) renders on-device with its own slim
+ * EPUB engine in lib/Epub. Verified against tag 1.3.0 of
+ * crosspoint-reader/crosspoint-reader:
+ *   - parsers/ChapterHtmlSlimParser.cpp BLOCK_TAGS is
+ *     {"p","li","div","br","blockquote"} -- "pre" is absent, so <pre> is not a
+ *     block and gets no special whitespace handling.
+ *   - Its text handler treats every space/tab/newline purely as a word
+ *     boundary and skips it, so source newlines AND indentation collapse and
+ *     the whole code block renders on one line.
+ *   - css/CssStyle.h has no white-space property at all, so no injected CSS
+ *     can restore the layout.
+ * Two firmware behaviors let us rebuild the layout in the markup itself:
+ *   - <br> IS a block tag (starts a new text block) -> use for line breaks.
+ *   - U+00A0 (nbsp) is emitted as its own non-breaking word token, never a
+ *     word boundary, so it renders as a visible space -> use for indentation.
+ * So we rewrite the raw text of each <pre> block:
+ *   - newlines              -> <br/>      (hard line break)
+ *   - leading whitespace of  -> nbsp run  (indentation; tab counts as 4)
+ *     each visual line
+ * Only whitespace at the *start of a line* becomes non-breaking; spaces
+ * between tokens stay breakable so long lines can still wrap on the narrow
+ * screen instead of clipping off-edge. The block is scanned tag-by-tag so
+ * inline markup (per-line spans) is passed through verbatim and "line start"
+ * is tracked across tag boundaries.
+ */
+function preserveCodeLayout(html) {
+    const NBSP = '\u00A0';
+    return html.replace(/<pre\b[^>]*>[\s\S]*?<\/pre>/gi, function (block) {
+        let out = '';
+        let i = 0;
+        let atLineStart = true;
+        while (i < block.length) {
+            if (block[i] === '<') {
+                const end = block.indexOf('>', i);
+                const tag = end === -1 ? block.slice(i) : block.slice(i, end + 1);
+                out += tag;
+                i = end === -1 ? block.length : end + 1;
+                if (/^<br\b/i.test(tag)) atLineStart = true;
+                continue;
+            }
+            let next = block.indexOf('<', i);
+            if (next === -1) next = block.length;
+            const text = block.slice(i, next);
+            i = next;
+            for (let k = 0; k < text.length; k++) {
+                const c = text[k];
+                if (c === '\n' || c === '\r') {
+                    if (c === '\r' && text[k + 1] === '\n') k++;
+                    out += '<br/>';
+                    atLineStart = true;
+                } else if (atLineStart && (c === ' ' || c === '\t')) {
+                    out += c === '\t' ? NBSP.repeat(4) : NBSP;
+                } else {
+                    if (c !== ' ' && c !== '\t') atLineStart = false;
+                    out += c;
+                }
+            }
+        }
+        return out;
+    });
+}
+
+/**
  * Inject e-paper optimized CSS into HTML documents
  */
 function injectEpaperCss(html) {
@@ -148,6 +213,8 @@ function injectEpaperCss(html) {
         'p { margin: 0.5em 0; text-indent: 1.5em; }' +
         'h1, h2, h3, h4, h5, h6 { text-indent: 0; margin: 1em 0 0.5em 0; }' +
         'img { max-width: 100%; height: auto; }' +
+        'pre { white-space: pre-wrap; word-wrap: break-word; text-indent: 0; font-family: monospace; }' +
+        'code { font-family: monospace; }' +
         '</style>';
 
     if (html.indexOf('</head>') !== -1) {
@@ -267,6 +334,10 @@ async function optimizeEpub(inputPath, outputPath, options) {
 
             // Strip data URIs to prevent OOM on device
             html = stripDataUris(html);
+
+            // Preserve code-block layout (firmware has no <pre>/white-space support)
+            html = preserveCodeLayout(html);
+            ops.push({ type: 'preserveCodeLayout', file: filePath });
 
             // Break words >200 chars to prevent layout issues
             html = breakLongWords(html, 200);
@@ -407,6 +478,7 @@ module.exports = {
     cleanHtmlStyles,
     stripDataUris,
     breakLongWords,
+    preserveCodeLayout,
     injectEpaperCss,
     processImage
 };
